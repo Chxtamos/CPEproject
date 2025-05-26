@@ -7,6 +7,29 @@ from deep_sort_realtime.deepsort_tracker import DeepSort
 from pymongo import MongoClient
 from datetime import datetime, timezone, timedelta
 from DFRobot_RaspberryPi_A02YYUW import DFRobot_A02_Distance as DistanceSensor
+from luma.core.interface.serial import i2c
+from luma.core.render import canvas
+from luma.oled.device import ssd1306 # ใช้ driver สำหรับ SSD1306
+
+
+I2C_ADDRESS = 0x3C # Address ของจอ OLED
+OLED_WIDTH = 128
+OLED_HEIGHT = 32 
+
+Serial Interface (I2C) 
+print("Initializing I2C serial interface for OLED...")
+oled_device = None
+try:
+    oled_serial = i2c(port=1, address=I2C_ADDRESS)
+    oled_device = ssd1306(oled_serial, width=OLED_WIDTH, height=OLED_HEIGHT)
+    print("OLED display initialized successfully.")
+    # เคลียร์จอ OLED ตอนเริ่ม
+    with canvas(oled_device) as draw:
+        draw.rectangle(oled_device.bounding_box, outline="black", fill="black")
+except Exception as e:
+    print(f"Error initializing OLED display: {e}")
+    print("OLED display will not be used.")
+
 
 sensor_board = DistanceSensor()
 sensor_board.set_dis_range(0, 4500)
@@ -19,7 +42,7 @@ def get_distance_mm():
         print("[⚠️] อ่านระยะไม่สำเร็จ - ใช้ค่าปริยาย 100 mm")
         return 100
 
-# โหลดโมเดล YOLOv8 ของเห็ด
+# โหลดโมเดล YOLOv8 
 model = YOLO(r"input your model")
 
 # สร้าง tracker DeepSort
@@ -44,10 +67,15 @@ if not cap.isOpened():
 # พารามิเตอร์กล้อง
 sensor_width_mm = 8.46666582 
 image_width_px = 640          
-focal_length_mm = 3.2        
+focal_length_mm = 3.2         
 
 last_log_time = 0
 log_interval = 3  # วินาที
+
+#เพิ่มตัวแปรสำหรับควบคุมการอัปเดตจอ OLED 
+last_oled_update_time = 0
+oled_update_interval = 1
+
 
 locked_ids = {}
 next_locked_id = 1
@@ -56,6 +84,10 @@ latest_mushroom_data = {}
 frame_count = 0
 
 print("Starting mushroom detection and sensor reading...")
+
+#เพิ่มตัวแปรสำหรับเก็บค่า T/H ล่าสุด
+current_temp = None
+current_humidity = None
 
 def read_dht_sensor(dht_device):
     try:
@@ -136,7 +168,7 @@ try:
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, label_text, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             latest_mushroom_data[locked_id] = {
                 "mushroom_id": int(locked_id),
@@ -148,13 +180,17 @@ try:
             }
 
             print(f"Track ID: {track_id} (Locked ID: {locked_id}), Center: ({center_x}, {center_y}), "
-                  f"Size(px): ({width_box_px}x{height_box_px}), Real Width: {object_real_width_cm:.2f} cm")
+                          f"Size(px): ({width_box_px}x{height_box_px}), Real Width: {object_real_width_cm:.2f} cm")
 
         # ถ้าถึงเวลา log และมีข้อมูล
         if now - last_log_time >= log_interval and latest_mushroom_data:
             print(f"เวลาเกิน {log_interval} วิ - เตรียมส่งข้อมูลเห็ดจำนวน {len(latest_mushroom_data)}")
 
             temperature_c, humidity = read_dht_sensor(dht_device)
+            # อัปเดตค่า ล่าสุดเพื่อใช้แสดงบน OLED
+            current_temp = temperature_c
+            current_humidity = humidity
+           
 
             if temperature_c is not None and humidity is not None:
                 print(f"อ่านค่าได้ Temp: {temperature_c}°C, Humidity: {humidity}%")
@@ -179,6 +215,27 @@ try:
 
             last_log_time = now
 
+        # เพิ่มส่วนแสดงผลบน OLED สำหรับอุณหภูมิและความชื้นเท่านั้น
+        if oled_device is not None and now - last_oled_update_time >= oled_update_interval:
+            with canvas(oled_device) as draw:
+                # อุณหภูมิ
+                temp_str = f"Temp: {current_temp:.1f} C" if current_temp is not None else "Temp: N/A C"
+                draw.text((0, 0), temp_str, fill="white")
+
+                # ความชื้น
+                humi_str = f"Humi: {current_humidity:.1f} %" if current_humidity is not None else "Humi: N/A %"
+                
+                # ตำแหน่ง y สำหรับบรรทัดที่ 2
+                if OLED_HEIGHT == 32:
+                    # สำหรับ 128x32, วางบรรทัดที่ 2 ที่ y=16 (กลางๆ จอ)
+                    draw.text((0, 16), humi_str, fill="white") 
+                elif OLED_HEIGHT == 64:
+                    # สำหรับ 128x64, วางบรรทัดที่ 2 ที่ y=20 (เว้นระยะจากบรรทัดแรก)
+                    draw.text((0, 20), humi_str, fill="white")
+
+            last_oled_update_time = now # อัปเดตเวลาที่ OLED ล่าสุด
+    
+
         time.sleep(0.05)
 
 except KeyboardInterrupt:
@@ -186,3 +243,8 @@ except KeyboardInterrupt:
 
 finally:
     cap.release()
+    # เพิ่มส่วนเคลียร์จอ OLED เมื่อโปรแกรมหยุด
+    if oled_device is not None:
+        with canvas(oled_device) as draw:
+            draw.rectangle(oled_device.bounding_box, outline="black", fill="black")
+    # ---
